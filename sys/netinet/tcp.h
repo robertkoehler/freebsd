@@ -101,6 +101,10 @@ struct tcphdr {
 #define	   TCPOLEN_FAST_OPEN_EMPTY	2
 #define	   TCPOLEN_FAST_OPEN_MIN	6
 #define	   TCPOLEN_FAST_OPEN_MAX	18
+#define TCPOPT_ENO			69	/* XXX ENO this has to be approved by IANA */
+#define TCPOPT_EXPERIMENTAL		253 	/* as per RFC 6994 */
+#define TCPOPT_EXPERIMENTAL_ENO_1	0x45	/* 'E' */
+#define TCPOPT_EXPERIMENTAL_ENO_2	0x4E	/* 'N' */
 
 /* Miscellaneous constants */
 #define	MAX_SACK_BLKS	6	/* Max # SACK blocks stored at receiver side */
@@ -174,6 +178,26 @@ struct tcphdr {
 #define	TCP_PCAP_OUT	2048	/* number of output packets to keep */
 #define	TCP_PCAP_IN	4096	/* number of input packets to keep */
 #define TCP_FUNCTION_BLK 8192	/* Set the tcp function pointers to the specified stack */
+
+/*****************/
+/* as from https://datatracker.ietf.org/doc/html/draft-ietf-tcpinc-api#section-2.2
+ * this is not a bit mask, so using 1 increment at reasonable start */
+#define TCP_ENO_ENABLED		1026	/* 0 disabled, -1 system default, 1 enabled */
+#define TCP_ENO_SESSID		1027
+#define TCP_ENO_NEGSPEC		1028
+#define TCP_ENO_SPECS		1029
+#define TCP_ENO_SELF_GOPT	1030
+#define TCP_ENO_PEER_GOPT	1031
+#define TCP_ENO_AA_MANDATORY	1032
+#define TCP_ENO_TEP_MANDATORY	1033
+#define TCP_ENO_ROLE		1034
+#define TCP_ENO_SELF_NAME	1035
+#define TCP_ENO_PEER_NAME	1036
+#define TCP_ENO_RAW		1037
+#define TCP_ENO_TRANSCRIPT	1038
+#define TCP_ENO_STATE		1039	/* custom addition */
+
+
 /* Start of reserved space for third-party user-settable options. */
 #define	TCP_VENDOR	SO_VENDOR
 

@@ -576,6 +576,14 @@ tcp_twrespond(struct tcptw *tw, int flags)
 		to.to_tsval = tcp_ts_getticks() + tw->ts_offset;
 		to.to_tsecr = tw->t_recent;
 	}
+
+#ifdef TCP_ENO
+	printf("tcp_twrespond() state=nope flags=%d=S%dA%d\n", flags, (flags & TH_SYN) > 1, (flags & TH_ACK) > 1);
+	if(flags & TH_SYN) {
+		to.to_flags |= TOF_ENO;
+		printf("tcp_twrespond() setting TOF_ENO\n");
+	}
+#endif
 	optlen = tcp_addoptions(&to, (u_char *)(th + 1));
 
 	m->m_len = hdrlen + optlen;

@@ -78,6 +78,15 @@ struct syncache {
 #endif
 	void		*sc_pspare;		/* TCP_SIGNATURE */
 	u_int32_t	sc_spare[2];		/* UTO */
+
+#ifdef TCP_ENO
+	/* XXX ENO shrink sc_spare? */
+	#define SC_ENO_ENABLE 1
+
+	/* XXX ENO could just store the best_tep here to save data ... */
+	struct tcp_eno_control	*sc_eno;
+	uint8_t 	*sc_eno_peer_transcript;
+#endif
 };
 
 /*

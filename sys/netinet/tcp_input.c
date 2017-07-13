@@ -119,7 +119,9 @@ __FBSDID("$FreeBSD$");
 #ifdef TCP_OFFLOAD
 #include <netinet/tcp_offload.h>
 #endif
-
+#ifdef TCP_ENO
+#include <netinet/tcp_eno.h>
+#endif
 #include <netipsec/ipsec_support.h>
 
 #include <machine/in_cksum.h>
@@ -334,7 +336,7 @@ cc_ack_received(struct tcpcb *tp, struct tcphdr *th, uint16_t nsegs,
 	}
 }
 
-void 
+void
 cc_conn_init(struct tcpcb *tp)
 {
 	struct hc_metrics_lite metrics;
@@ -437,7 +439,7 @@ cc_cong_signal(struct tcpcb *tp, struct tcphdr *th, uint32_t type)
 		EXIT_RECOVERY(tp->t_flags);
 		if (CC_ALGO(tp)->cong_signal == NULL) {
 			/*
-			 * RFC5681 Section 3.1 
+			 * RFC5681 Section 3.1
 			 * ssthresh = max (FlightSize / 2, 2*SMSS) eq (4)
 			 */
 			tp->snd_ssthresh =
@@ -575,6 +577,7 @@ tcp6_input(struct mbuf **mp, int *offp, int proto)
 }
 #endif /* INET6 */
 
+
 int
 tcp_input(struct mbuf **mp, int *offp, int proto)
 {
@@ -615,6 +618,7 @@ tcp_input(struct mbuf **mp, int *offp, int proto)
 	short ostate = 0;
 #endif
 
+
 #ifdef INET6
 	isipv6 = (mtod(m, struct ip *)->ip_v == 6) ? 1 : 0;
 #endif
@@ -624,6 +628,7 @@ tcp_input(struct mbuf **mp, int *offp, int proto)
 	*mp = NULL;
 	to.to_flags = 0;
 	TCPSTAT_INC(tcps_rcvtotal);
+
 
 #ifdef INET6
 	if (isipv6) {
@@ -994,8 +999,12 @@ relocked:
 		}
 		INP_INFO_RLOCK_ASSERT(&V_tcbinfo);
 
-		if (thflags & TH_SYN)
+		if (thflags & TH_SYN) {
 			tcp_dooptions(&to, optp, optlen, TO_SYN);
+#ifdef TCP_ENO
+			printf("tcp_input()#1 eno dport=%d flags=%d=S%dA%d opt=E%d\n", th->th_dport, thflags, (thflags & TH_SYN) > 0, (thflags & TH_ACK) > 0, (to.to_flags & TOF_ENO) > 0);
+#endif
+		}
 		/*
 		 * NB: tcp_twcheck unlocks the INP and frees the mbuf.
 		 */
@@ -1386,6 +1395,7 @@ tfo_socket_result:
 #endif
 		TCP_PROBE3(debug__input, tp, th, m);
 		tcp_dooptions(&to, optp, optlen, TO_SYN);
+
 #ifdef TCP_RFC7413
 		if (syncache_add(&inc, &to, th, inp, &so, m, NULL, NULL))
 			goto tfo_socket_result;
@@ -1415,6 +1425,9 @@ tfo_socket_result:
 #if defined(IPSEC_SUPPORT) || defined(TCP_SIGNATURE)
 	if (tp->t_flags & TF_SIGNATURE) {
 		tcp_dooptions(&to, optp, optlen, thflags);
+#ifdef TCP_ENO
+		printf("tcp_input()#4 eno dport=%d flags=%d=S%dA%d opt=E%d\n", th->th_dport, thflags, (thflags & TH_SYN) > 0, (thflags & TH_ACK) > 0, (to.to_flags & TOF_ENO) > 0_len);
+#endif
 		if ((to.to_flags & TOF_SIGNATURE) == 0) {
 			TCPSTAT_INC(tcps_sig_err_nosigopt);
 			goto dropunlock;
@@ -1502,7 +1515,7 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 #ifdef TCP_RFC7413
 	int tfo_syn;
 #endif
-	
+
 #ifdef TCPDEBUG
 	/*
 	 * The size of tcp_saveipgen must be the size of the max ip header,
@@ -1600,6 +1613,7 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	    (th->th_off << 2) - sizeof(struct tcphdr),
 	    (thflags & TH_SYN) ? TO_SYN : 0);
 
+
 #if defined(IPSEC_SUPPORT) || defined(TCP_SIGNATURE)
 	if ((tp->t_flags & TF_SIGNATURE) != 0 &&
 	    (to.to_flags & TOF_SIGNATURE) == 0) {
@@ -1665,7 +1679,18 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 		if ((tp->t_flags & TF_SACK_PERMIT) &&
 		    (to.to_flags & TOF_SACKPERM) == 0)
 			tp->t_flags &= ~TF_SACK_PERMIT;
+
+#ifdef TCP_ENO
+		printf("input/tcp_do_segment()\n");
+		tcp_eno_option_parse_syn_ack(tp, &to);
+#endif
 	}
+	
+
+#ifdef TCP_ENO
+	/* dooptions is 40 lines up */
+	printf("tcp_input()#5 dport=%d flags=%d=S%dA%d opt=E%d\n", th->th_dport, thflags, (thflags & TH_SYN) > 0, (thflags & TH_ACK) > 0, (to.to_flags & TOF_ENO) > 0);
+#endif
 
 	/*
 	 * Header prediction: check for the two common cases
@@ -1688,7 +1713,7 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	    th->th_seq == tp->rcv_nxt &&
 	    (thflags & (TH_SYN|TH_FIN|TH_RST|TH_URG|TH_ACK)) == TH_ACK &&
 	    tp->snd_nxt == tp->snd_max &&
-	    tiwin && tiwin == tp->snd_wnd && 
+	    tiwin && tiwin == tp->snd_wnd &&
 	    ((tp->t_flags & (TF_NEEDSYN|TF_NEEDFIN)) == 0) &&
 	    LIST_EMPTY(&tp->t_segq) &&
 	    ((to.to_flags & TOF_TS) == 0 ||
@@ -1768,7 +1793,7 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 				if (SEQ_GT(tp->snd_una, tp->snd_recover) &&
 				    SEQ_LEQ(th->th_ack, tp->snd_recover))
 					tp->snd_recover = th->th_ack - 1;
-				
+
 				/*
 				 * Let the congestion control algorithm update
 				 * congestion control related information. This
@@ -1920,6 +1945,19 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 					    newsize, so, NULL))
 						so->so_rcv.sb_flags &= ~SB_AUTOSIZE;
 				m_adj(m, drop_hdrlen);	/* delayed header drop */
+
+#ifdef TCP_ENO
+				/* XXX ENO tcp_eno_decrypt(tp, tlen, m) */
+				printf("tcp_do_segment(): hlen=%d tlen=%d ec_negspec=%02x ec_st=" ENOS_FMT "\n", drop_hdrlen, tlen, tp->t_eno->ec_negspec, ENOS_VAL(tp->t_eno->ec_state));
+				if(ENOS_STATE(tp->t_eno->ec_state) == ENOS_SUCCESS && ENO_GET_TEP_ID(tp->t_eno->ec_negspec) == _TEP_XOR) {
+					printf("tcp_input/tcp_do_segment(): _TEP_XOR decrypting using key 0x%02x%02x%02x%02x\n", ((char*)tp->t_eno->ec_proto)[0], ((char*)tp->t_eno->ec_proto)[1], ((char*)tp->t_eno->ec_proto)[2], ((char*)tp->t_eno->ec_proto)[3]);
+					struct eno_xor_ctx ctx;
+					bcopy((char *)tp->t_eno->ec_proto, &ctx.key, ENO_XOR_KEY_LEN);
+					ctx.kpos = 0;
+					m_apply(m, 0, tlen, tcp_eno_xor_apply, &ctx);
+				}
+#endif
+
 				sbappendstream_locked(&so->so_rcv, m, 0);
 			}
 			/* NB: sorwakeup_locked() does an implicit unlock. */
@@ -1976,7 +2014,7 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 				goto dropwithreset;
 			} else if (thflags & TH_SYN) {
 				/* non-initial SYN is ignored */
-				if ((tcp_timer_active(tp, TT_DELACK) || 
+				if ((tcp_timer_active(tp, TT_DELACK) ||
 				     tcp_timer_active(tp, TT_REXMT)))
 					goto drop;
 			} else if (!(thflags & (TH_ACK|TH_FIN|TH_RST))) {
@@ -2016,6 +2054,7 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 			goto drop;
 		if (!(thflags & TH_SYN))
 			goto drop;
+/// this is a reasonable syn ack .... soon we will send handshake ack XXX ENO
 
 		tp->irs = th->th_seq;
 		tcp_rcvseqinit(tp);
@@ -2033,6 +2072,8 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 			tp->rcv_adv += min(tp->rcv_wnd,
 			    TCP_MAXWIN << tp->rcv_scale);
 			tp->snd_una++;		/* SYN is acked */
+			
+/// AHAHAA??? where???
 			/*
 			 * If there's data, delay ACK; if there's also a FIN
 			 * ACKNOW will be turned on later.
@@ -2047,7 +2088,7 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 				tp->t_flags |= TF_ECN_PERMIT;
 				TCPSTAT_INC(tcps_ecn_shs);
 			}
-			
+
 			/*
 			 * Received <SYN,ACK> in SYN_SENT[*] state.
 			 * Transitions:
@@ -2085,6 +2126,7 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 		    "ti_locked %d", __func__, ti_locked));
 		INP_INFO_RLOCK_ASSERT(&V_tcbinfo);
 		INP_WLOCK_ASSERT(tp->t_inpcb);
+		
 
 		/*
 		 * Advance th->th_seq to correspond to first data byte.
@@ -2102,6 +2144,7 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 		}
 		tp->snd_wl1 = th->th_seq - 1;
 		tp->rcv_up = th->th_seq;
+
 		/*
 		 * Client side of transaction: already sent SYN and data.
 		 * If the remote host used T/TCP to validate the SYN,
@@ -2111,6 +2154,7 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 		 */
 		if (thflags & TH_ACK)
 			goto process_ACK;
+			
 
 		goto step6;
 
@@ -2365,14 +2409,14 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	/*
 	 * If last ACK falls within this segment's sequence numbers,
 	 * record its timestamp.
-	 * NOTE: 
+	 * NOTE:
 	 * 1) That the test incorporates suggestions from the latest
 	 *    proposal of the tcplw@cray.com list (Braden 1993/04/26).
 	 * 2) That updating only on newer timestamps interferes with
 	 *    our earlier PAWS tests, so this check should be solely
 	 *    predicated on the sequence space of this segment.
-	 * 3) That we modify the segment boundary check to be 
-	 *        Last.ACK.Sent <= SEG.SEQ + SEG.Len  
+	 * 3) That we modify the segment boundary check to be
+	 *        Last.ACK.Sent <= SEG.SEQ + SEG.Len
 	 *    instead of RFC1323's
 	 *        Last.ACK.Sent < SEG.SEQ + SEG.Len,
 	 *    This modified check allows us to overcome RFC1323's
@@ -2451,7 +2495,7 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 				/*
 				 * Account for the ACK of our SYN prior to
 				 * regular ACK processing below.
-				 */ 
+				 */
 				tp->snd_una++;
 			}
 			/*
@@ -2580,10 +2624,10 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 					if ((tp->t_flags & TF_SACK_PERMIT) &&
 					    IN_FASTRECOVERY(tp->t_flags)) {
 						int awnd;
-						
+
 						/*
 						 * Compute the amount of data in flight first.
-						 * We can inject new data into the pipe iff 
+						 * We can inject new data into the pipe iff
 						 * we have less than 1/2 the original window's
 						 * worth of data in flight.
 						 */
@@ -2880,6 +2924,7 @@ process_ACK:
 		}
 		if (SEQ_LT(tp->snd_nxt, tp->snd_una))
 			tp->snd_nxt = tp->snd_una;
+
 
 		switch (tp->t_state) {
 
@@ -3440,11 +3485,31 @@ tcp_dooptions(struct tcpopt *to, u_char *cp, int cnt, int flags)
 			to->to_tfo_cookie = to->to_tfo_len ? cp + 2 : NULL;
 			break;
 #endif
+#ifdef TCP_ENO
+		/* XXX ENO take care of skip-on-syn flags */
+		case TCPOPT_EXPERIMENTAL:
+			if(optlen < 4)
+				continue; /* 16 bit codepoint required to be complete */
+			if(cp[2] != TCPOPT_EXPERIMENTAL_ENO_1 || cp[3] != TCPOPT_EXPERIMENTAL_ENO_2)
+				continue;
+		case TCPOPT_ENO:
+			to->to_flags |= TOF_ENO;
+			to->to_eno = cp;
+
+			printf("tcp_dooptions() dump transcript = ");
+			for(uint8_t i = 0; i < cp[1]; i ++)
+				printf("%02x ", cp[i]);
+			printf("\n");
+
+			break;
+#endif
 		default:
 			continue;
 		}
 	}
 }
+
+
 
 /*
  * Pull out of band byte out of a segment so

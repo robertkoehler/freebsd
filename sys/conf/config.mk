@@ -14,6 +14,7 @@ opt_bpf.h:
 opt_inet.h:
 	@echo "#define INET 1" > ${.TARGET}
 	@echo "#define TCP_OFFLOAD 1" >> ${.TARGET}
+	@echo "#define TCP_ENO 1" >> ${.TARGET}
 .endif
 .if ${MK_INET6_SUPPORT} != "no"
 opt_inet6.h:
@@ -44,7 +45,7 @@ KERN_OPTS=MROUTING NATM IEEE80211_DEBUG \
 	IEEE80211_AMPDU_AGE IEEE80211_SUPPORT_MESH DEV_BPF \
 	${KERN_OPTS.${MACHINE}} ${KERN_OPTS_EXTRA}
 .if ${MK_INET_SUPPORT} != "no"
-KERN_OPTS+= INET TCP_OFFLOAD
+KERN_OPTS+= INET TCP_OFFLOAD TCP_ENO
 .endif
 .if ${MK_INET6_SUPPORT} != "no"
 KERN_OPTS+= INET6

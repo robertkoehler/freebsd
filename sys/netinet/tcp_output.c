@@ -89,7 +89,9 @@ __FBSDID("$FreeBSD$");
 #ifdef TCP_OFFLOAD
 #include <netinet/tcp_offload.h>
 #endif
-
+#ifdef TCP_ENO
+#include <netinet/tcp_eno.h>
+#endif
 #include <netipsec/ipsec_support.h>
 
 #include <machine/in_cksum.h>
@@ -181,6 +183,8 @@ cc_after_idle(struct tcpcb *tp)
 	if (CC_ALGO(tp)->after_idle != NULL)
 		CC_ALGO(tp)->after_idle(tp->ccv);
 }
+
+
 
 /*
  * Tcp output routine: figure out what should be sent and send it.
@@ -283,7 +287,7 @@ again:
 	if ((tp->t_flags & TF_SACK_PERMIT) && IN_FASTRECOVERY(tp->t_flags) &&
 	    (p = tcp_sack_output(tp, &sack_bytes_rxmt))) {
 		uint32_t cwin;
-		
+
 		cwin =
 		    imax(min(tp->snd_wnd, tp->snd_cwnd) - sack_bytes_rxmt, 0);
 		/* Do not retransmit SACK segments beyond snd_recover */
@@ -394,14 +398,14 @@ after_sack_rexmit:
 			    off);
 			/*
 			 * Don't remove this (len > 0) check !
-			 * We explicitly check for len > 0 here (although it 
-			 * isn't really necessary), to work around a gcc 
+			 * We explicitly check for len > 0 here (although it
+			 * isn't really necessary), to work around a gcc
 			 * optimization issue - to force gcc to compute
 			 * len above. Without this check, the computation
 			 * of len is bungled by the optimizer.
 			 */
 			if (len > 0) {
-				cwin = tp->snd_cwnd - 
+				cwin = tp->snd_cwnd -
 					(tp->snd_nxt - tp->sack_newdata) -
 					sack_bytes_rxmt;
 				if (cwin < 0)
@@ -533,7 +537,7 @@ after_sack_rexmit:
 		}
 	}
 
-	/*
+		/*
 	 * Decide if we can use TCP Segmentation Offloading (if supported by
 	 * hardware).
 	 *
@@ -683,7 +687,7 @@ after_sack_rexmit:
 		} else
 			oldwin = 0;
 
-		/* 
+		/*
 		 * If the new window size ends up being the same as or less
 		 * than the old size when it is scaled, then don't force
 		 * a window update.
@@ -728,7 +732,7 @@ dontupdate:
 	    !tcp_timer_active(tp, TT_PERSIST)) {
 		tcp_timer_activate(tp, TT_REXMT, tp->t_rxtcur);
 		goto just_return;
-	} 
+	}
 	/*
 	 * TCP window updates are not reliable, rather a polling protocol
 	 * using ``persist'' packets is used to insure receipt of window
@@ -855,6 +859,35 @@ send:
 		if (tp->t_flags & TF_SIGNATURE)
 			to.to_flags |= TOF_SIGNATURE;
 #endif /* TCP_SIGNATURE */
+
+#ifdef TCP_ENO
+		printf("tcp_output() t_st=%d t_fl=%d=S%dA%d ec=%x ec_st=" ENOS_FMT "\n",
+		       tp->t_state, flags, (flags & TH_SYN) > 1, (flags & TH_ACK) > 1,
+		       (uint32_t) tp->t_eno, ENOS_VAL(tp->t_eno->ec_state)); /* ptr truncated, for rough matching only */
+/*
+		printf("tcp_output() TEMP thport=%d->%d, %d->%d\n"
+		       , th->th_sport, th->th_dport
+		       , tp->t_inpcb->inp_lport, tp->t_inpcb->inp_fport);  
+*/
+		/* SYN|ACK will not pass the code here, no need to filter it */
+		if(flags & TH_SYN)
+			tcp_eno_option_create_syn(tp, &to);
+
+		/* sending ACK + ENO<> for final ENO */
+		/* NOTE: misusing NEGOTIATE -> SUCCESS state switch to send ACK+ENO<> with the first ACK only */
+		/* putting empty_eno inline skips dynamics mem alloc */
+		/* XXX ENO this option is not necessarily empty, data comes from the TEP!! */
+		uint8_t empty_eno[] = TCP_ENO_OPTHEADER(TCP_ENO_OPTHEADER_LEN);
+		if(flags & TH_ACK && ENOS_STATE(tp->t_eno->ec_state) == ENOS_NEGOTIATE) {
+
+			// tp->t_flags & TF_ACKNOW is set by SYN|ACK recvd' do_segment
+
+			to.to_flags |= TOF_ENO;
+			to.to_eno = empty_eno;
+
+			tp->t_eno->ec_state = ENOS_SUCCESS | ENOS_ACK | ENOS_SENT;
+		}
+#endif
 
 		/* Processing the options. */
 		hdrlen += optlen = tcp_addoptions(&to, opt);
@@ -1066,12 +1099,12 @@ send:
 		 */
 		mb = sbsndptr(&so->so_snd, off, len, &moff);
 
-		if (len <= MHLEN - hdrlen - max_linkhdr) {
+		if (len <= MHLEN - hdrlen - max_linkhdr) { /* XXX ENO looks like the data is either copied into the hdr mbuf ... */
 			m_copydata(mb, moff, len,
 			    mtod(m, caddr_t) + hdrlen);
 			m->m_len += len;
 		} else {
-			m->m_next = m_copym(mb, moff, len, M_NOWAIT);
+			m->m_next = m_copym(mb, moff, len, M_NOWAIT); /* XXX ENO ... or attached as new mbufs */
 			if (m->m_next == NULL) {
 				SOCKBUF_UNLOCK(&so->so_snd);
 				(void) m_free(m);
@@ -1080,6 +1113,19 @@ send:
 				goto out;
 			}
 		}
+
+#ifdef TCP_ENO
+		printf("tcp_output()->ip_output(): hdrlen = %d max_linkhdr = %d\n", hdrlen, max_linkhdr);
+
+		/* XXX ENO need to arrange in/output */
+		if(ENOS_STATE(tp->t_eno->ec_state) == ENOS_SUCCESS && ENO_GET_TEP_ID(tp->t_eno->ec_negspec) == _TEP_XOR) {
+			printf("tcp_output(): _TEP_XOR encrypting using key 0x%02x%02x%02x%02x\n", ((char*)tp->t_eno->ec_proto)[0], ((char*)tp->t_eno->ec_proto)[1], ((char*)tp->t_eno->ec_proto)[2], ((char*)tp->t_eno->ec_proto)[3]);
+			struct eno_xor_ctx ctx;
+			bcopy((char *)tp->t_eno->ec_proto, &ctx.key, ENO_XOR_KEY_LEN);
+			ctx.kpos = 0;
+			m_apply(m, hdrlen, len, tcp_eno_xor_apply, &ctx);
+		}
+#endif
 
 		/*
 		 * If we're sending everything we've got, set PUSH.
@@ -1157,7 +1203,7 @@ send:
 		} else
 			flags |= TH_ECE|TH_CWR;
 	}
-	
+
 	if (tp->t_state == TCPS_ESTABLISHED &&
 	    (tp->t_flags & TF_ECN_PERMIT)) {
 		/*
@@ -1175,18 +1221,18 @@ send:
 				ip->ip_tos |= IPTOS_ECN_ECT0;
 			TCPSTAT_INC(tcps_ecn_ect0);
 		}
-		
+
 		/*
 		 * Reply with proper ECN notifications.
 		 */
 		if (tp->t_flags & TF_ECN_SND_CWR) {
 			flags |= TH_CWR;
 			tp->t_flags &= ~TF_ECN_SND_CWR;
-		} 
+		}
 		if (tp->t_flags & TF_ECN_SND_ECE)
 			flags |= TH_ECE;
 	}
-	
+
 	/*
 	 * If we are doing retransmissions, then snd_nxt will
 	 * not reflect the first unsent octet.  For ACK only
@@ -1393,6 +1439,7 @@ send:
 		 */
 		ip6->ip6_plen = htons(m->m_pkthdr.len - sizeof(*ip6));
 
+	
 		if (V_path_mtu_discovery && tp->t_maxseg > V_tcp_minmss)
 			tp->t_flags2 |= TF2_PLPMTU_PMTUD;
 		else
@@ -1467,7 +1514,7 @@ out:
 	 * In transmit state, time the transmission and arrange for
 	 * the retransmit.  In persist state, just set snd_max.
 	 */
-	if ((tp->t_flags & TF_FORCEDATA) == 0 || 
+	if ((tp->t_flags & TF_FORCEDATA) == 0 ||
 	    !tcp_timer_active(tp, TT_PERSIST)) {
 		tcp_seq startseq = tp->snd_nxt;
 
@@ -1824,11 +1871,43 @@ tcp_addoptions(struct tcpopt *to, u_char *optp)
 			break;
 			}
 #endif
+
+#ifdef TCP_ENO
+		case TOF_ENO:
+			if(to->to_eno == NULL) {
+				printf("tcp_output(): no ENO available, but TOF_ENO set\n");
+				continue;
+			}
+
+			if (TCP_MAXOLEN - optlen < TCP_ENO_OPT_LEN(to->to_eno)) {
+				printf("tcp_output(): no space for ENO\n");
+				continue;
+			}
+
+			/* XXX ENO aligning to word boundary. Need to do anything else? */
+			while (optlen % 2) {
+				optlen += TCPOLEN_NOP;
+				*optp++ = TCPOPT_NOP;
+			}
+
+			/* every other option builds here, but we have to have it all ready for the transcript ... */
+			bcopy(to->to_eno, optp, TCP_ENO_OPT_LEN(to->to_eno));
+			
+			printf("tcp_addoption() dump transcript = ");
+			for(uint8_t i = 0; i < to->to_eno[1]; i ++)
+				printf("%02x ", to->to_eno[i]);
+			printf("\n");
+
+			optp += TCP_ENO_OPT_LEN(to->to_eno);
+			optlen += TCP_ENO_OPT_LEN(to->to_eno);
+			break;
+#endif /* TCP_ENO */
 		default:
 			panic("%s: unknown TCP option type", __func__);
 			break;
 		}
 	}
+
 
 	/* Terminate and pad TCP options to a 4 byte boundary. */
 	if (optlen % 4) {

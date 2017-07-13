@@ -90,7 +90,7 @@ struct tcptemp {
 
 #define tcp6cb		tcpcb  /* for KAME src sync over BSD*'s */
 
-/* 
+/*
  * TODO: We yet need to brave plowing in
  * to tcp_input() and the pru_usrreq() block.
  * Right now these go to the old standards which
@@ -301,6 +301,13 @@ struct tcpcb {
 #else
 	uint64_t _pad[6];
 #endif /* defined(_KERNEL) && defined(TCPPCAP) */
+
+
+#ifdef TCP_ENO
+	struct tcp_eno_control *t_eno;
+#else
+	/* XXX ENO take part in this padding madness */
+#endif
 };
 
 /*
@@ -387,7 +394,8 @@ struct tcpopt {
 #define	TOF_SIGNATURE	0x0040		/* TCP-MD5 signature option (RFC2385) */
 #define	TOF_SACK	0x0080		/* Peer sent SACK option */
 #define	TOF_FASTOPEN	0x0100		/* TCP Fast Open (TFO) cookie */
-#define	TOF_MAXOPT	0x0200
+#define	TOF_ENO		0x0200		/* encryption negotiation option */
+#define	TOF_MAXOPT	0x0400
 	u_int32_t	to_tsval;	/* new timestamp */
 	u_int32_t	to_tsecr;	/* reflected timestamp */
 	u_char		*to_sacks;	/* pointer to the first SACK blocks */
@@ -398,6 +406,9 @@ struct tcpopt {
 	u_int8_t	to_nsacks;	/* number of SACK blocks */
 	u_int8_t	to_tfo_len;	/* TFO cookie length */
 	u_int32_t	to_spare;	/* UTO */
+#ifdef TCP_ENO
+	uint8_t		*to_eno;	/* pointer to ENO incl. type and len */
+#endif
 };
 
 /*
@@ -588,7 +599,7 @@ struct	tcpstat {
 	uint64_t tcps_sack_rcv_blocks;	    /* SACK blocks (options) received */
 	uint64_t tcps_sack_send_blocks;	    /* SACK blocks (options) sent     */
 	uint64_t tcps_sack_sboverflow;	    /* times scoreboard overflowed */
-	
+
 	/* ECN related stats */
 	uint64_t tcps_ecn_ce;		/* ECN Congestion Experienced */
 	uint64_t tcps_ecn_ect0;		/* ECN Capable Transport */

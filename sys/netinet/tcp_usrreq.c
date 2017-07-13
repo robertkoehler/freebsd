@@ -102,8 +102,10 @@ __FBSDID("$FreeBSD$");
 #ifdef TCP_OFFLOAD
 #include <netinet/tcp_offload.h>
 #endif
+#ifdef TCP_ENO
+#include <netinet/tcp_eno.h>
+#endif
 #include <netipsec/ipsec_support.h>
-
 /*
  * TCP protocol interface to socket abstraction.
  */
@@ -1779,7 +1781,96 @@ unlock_and_done:
 				tp->t_flags &= ~TF_FASTOPEN;
 			goto unlock_and_done;
 #endif
+#ifdef TCP_ENO
+		case TCP_ENO_ENABLED: /* rW | int (-1, 0, or 1) */
+			/* XXX ENO "... return ... EISCONN ... after a SYN segment has already been sent." Q: can I rely on state, as close + reset allow a way back. */
+			if(tp->t_state >= TCPS_SYN_SENT) {
+				error = EISCONN;
+				goto unlock_and_done;
+			}
+			INP_WUNLOCK(inp);
 
+			error = sooptcopyin(sopt, &optval, sizeof optval,
+			    sizeof optval);
+			if (error)
+				return (error);
+			if (optval < -1 || optval > 1)
+				return (EINVAL);
+
+			INP_WLOCK_RECHECK(inp);
+			tp->t_eno->ec_enabled = optval;
+			goto unlock_and_done;
+		case TCP_ENO_SPECS: /* RW | bytes */
+			printf("TCP_ENO_SPECS w\n");
+			if(tp->t_state >= TCPS_SYN_SENT) {
+				error = EISCONN;
+				goto unlock_and_done;
+			}
+			INP_WUNLOCK(inp);
+
+			if(sopt->sopt_valsize > sizeof(tp->t_eno->ec_specs)) { /* too large for our specs array. better fail loud. */
+				printf("TCP_ENO_SPECS sopt->sopt_valsize too big\n");
+				error = E2BIG; /* Argument list too long */
+				goto unlock_and_done; 
+			}
+			pbuf = malloc(sizeof(tp->t_eno->ec_specs), M_TEMP, M_WAITOK | M_ZERO);
+			error = sooptcopyin(sopt, pbuf, sopt->sopt_valsize, 0);
+			if (!error)
+				for(uint8_t i = 0; i < min(sopt->sopt_valsize, sizeof(tp->t_eno->ec_specs)); i ++)
+					if((pbuf[i] & 0x7f) < 0x20) {
+						error = EINVAL;
+						break;
+					}
+			if (error) {
+				printf("TCP_ENO_SPECS error %d\n", error);
+				free(pbuf, M_TEMP);
+				return (error);
+			}
+			
+			INP_WLOCK_RECHECK_CLEANUP(inp, free(pbuf, M_TEMP));
+			printf("TCP_ENO_SPECS copying\n");
+			strlcpy((char *) &tp->t_eno->ec_specs, pbuf, min(sopt->sopt_valsize + 1, sizeof(tp->t_eno->ec_specs))); /* makes it a 0-terminated str */
+			free(pbuf, M_TEMP);
+			printf("TCP_ENO_SPECS done\n");
+			goto unlock_and_done;
+		case TCP_ENO_SELF_GOPT: /* rW | int (0-31) */
+			/* XXX ENO Q: shouldn't I only accept &0x03 bytes, as z0 z1 ... may be reserved for ENO internals? */
+			INP_WUNLOCK(inp);
+			error = sooptcopyin(sopt, &optval, sizeof optval,
+			    sizeof optval);
+			if (error)
+				return (error);
+			if (optval & ~0x1f) /* ! 0-31 */
+				return (EINVAL);
+			INP_WLOCK_RECHECK(inp);
+			tp->t_eno->ec_self_gopt = optval;
+			goto unlock_and_done;
+		case TCP_ENO_AA_MANDATORY: /* rW | int (0 or 1) */
+			INP_WUNLOCK(inp);
+			error = sooptcopyin(sopt, &optval, sizeof optval,
+			    sizeof optval);
+			if (error)
+				return (error);
+			if (optval & ~0x01)
+				return (EINVAL);
+
+			INP_WLOCK_RECHECK(inp);
+			tp->t_eno->ec_aa_mandatory = optval;
+			goto unlock_and_done;
+		case TCP_ENO_TEP_MANDATORY: /* rW | int (0 or 1) */
+			INP_WUNLOCK(inp);
+			error = sooptcopyin(sopt, &optval, sizeof optval,
+			    sizeof optval);
+			if (error)
+				return (error);
+			if (optval & ~0x01)
+				return (EINVAL);
+
+			INP_WLOCK_RECHECK(inp);
+			tp->t_eno->ec_tep_mandatory = optval;
+			goto unlock_and_done;
+		/* XXX ENO case TCP_ENO_RAW: / * rW | bytes */
+#endif
 		default:
 			INP_WUNLOCK(inp);
 			error = ENOPROTOOPT;
@@ -1868,6 +1959,142 @@ unlock_and_done:
 			error = sooptcopyout(sopt, &optval, sizeof optval);
 			break;
 #endif
+#ifdef TCP_ENO
+		case TCP_ENO_ENABLED:
+			optval = tp->t_eno->ec_enabled;
+			INP_WUNLOCK(inp);
+			error = sooptcopyout(sopt, &optval, sizeof optval);
+			break;
+		case TCP_ENO_STATE: /* R | int -- custom addition */
+			optval = tp->t_eno->ec_state;
+			INP_WUNLOCK(inp);
+			error = sooptcopyout(sopt, &optval, sizeof optval);
+			break;
+		case TCP_ENO_SESSID: /* R | bytes */
+			if(tp->t_state < TCPS_SYN_SENT) { /* XXX ENO correct state, use later one? */
+				INP_WUNLOCK(inp);
+				return (ENOTCONN);
+			}
+			len = tp->t_eno->ec_sessid_len;
+			INP_WUNLOCK(inp);
+			pbuf = malloc(len, M_TEMP, M_WAITOK);
+
+			INP_WLOCK_RECHECK_CLEANUP(inp, free(pbuf, M_TEMP));
+			/* XXX ENO assert tp->t_eno->ec_sessid_len == len
+			 * what if unlocked sessid got updated to a longer one?
+			 * ... still, we are safe to not copy more than pbuf's size */
+			bcopy((char *) tp->t_eno->ec_sessid, pbuf, len);
+			INP_WUNLOCK(inp);
+
+			error = sooptcopyout(sopt, pbuf, len);
+			free(pbuf, M_TEMP);
+			break;
+		case TCP_ENO_NEGSPEC: /* R | int (32-127, 160-255) */
+			/* XXX ENO Q: how to behave for non-negotiated spec? */
+			optval = tp->t_eno->ec_negspec;
+			INP_WUNLOCK(inp);
+			error = sooptcopyout(sopt, &optval, sizeof optval);
+			break;
+		case TCP_ENO_SPECS: /* Rw | bytes */
+			/* this will NOT create a \0 terminated string, instead len is passed */
+			INP_WUNLOCK(inp);
+			pbuf = malloc(sizeof(tp->t_eno->ec_specs), M_TEMP, M_WAITOK); /* alloc max len of ec_specs, so no surprises if specs updated */
+			
+			INP_WLOCK_RECHECK_CLEANUP(inp, free(pbuf, M_TEMP));
+			len = strnlen(tp->t_eno->ec_specs, sizeof(tp->t_eno->ec_specs));
+			bcopy((char *) tp->t_eno->ec_specs, pbuf, len);
+			INP_WUNLOCK(inp);
+
+			error = sooptcopyout(sopt, pbuf, len);
+			free(pbuf, M_TEMP);
+			break;
+		case TCP_ENO_SELF_GOPT: /* Rw | int (0-31) */
+			optval = tp->t_eno->ec_self_gopt;
+			INP_WUNLOCK(inp);
+			error = sooptcopyout(sopt, &optval, sizeof optval);
+			break;
+		case TCP_ENO_PEER_GOPT: /* R | int (0-31) */
+			optval = tp->t_eno->ec_peer_gopt;
+			INP_WUNLOCK(inp);
+			error = sooptcopyout(sopt, &optval, sizeof optval);
+			break;
+		case TCP_ENO_AA_MANDATORY: /* Rw | int (0 or 1) */
+			optval = tp->t_eno->ec_aa_mandatory;
+			INP_WUNLOCK(inp);
+			error = sooptcopyout(sopt, &optval, sizeof optval);
+			break;
+		case TCP_ENO_TEP_MANDATORY: /* Rw | int (0 or 1) */
+			optval = tp->t_eno->ec_tep_mandatory;
+			INP_WUNLOCK(inp);
+			error = sooptcopyout(sopt, &optval, sizeof optval);
+			break;
+		case TCP_ENO_ROLE: /* R | int (0 or 1) */
+			/* Returns 0 on host "A" and 1 on host "B", according to the roles
+			 * defined by TCP-ENO.  When successful, the value is always equal to
+			 * the least significant bit of the value returned by
+			 * TCP_ENO_SELF_GOPT
+			 */
+			if(tp->t_state < TCPS_SYN_SENT) {
+				INP_WUNLOCK(inp);
+				return (ENOTCONN);
+			}
+			/* XXX ENO use it as soon as ready ...
+			if(tp->t_eno->ec_state ... IS NOT SUCCESSFUL) {
+				INP_WUNLOCK(inp);
+				return (EINVAL);
+			} */
+
+			optval = tp->t_eno->ec_self_gopt & ENO_GOPT_PASSIVE_ROLE;
+			INP_WUNLOCK(inp);
+			error = sooptcopyout(sopt, &optval, sizeof optval);
+			break;
+		case TCP_ENO_SELF_NAME: /* R | bytes */
+		case TCP_ENO_PEER_NAME: /* R | bytes */
+			if(tp->t_state < TCPS_SYN_SENT) {
+				INP_WUNLOCK(inp);
+				return (ENOTCONN);
+			}
+			len = tp->t_eno->ec_sessid_len + 1;
+			INP_WUNLOCK(inp);
+			pbuf = malloc(len, M_TEMP, M_WAITOK);
+
+			INP_WLOCK_RECHECK_CLEANUP(inp, free(pbuf, M_TEMP));
+			pbuf[0] = (sopt->sopt_name == TCP_ENO_PEER_NAME ? ~tp->t_eno->ec_self_gopt : tp->t_eno->ec_self_gopt) & ENO_GOPT_PASSIVE_ROLE;
+
+			/* XXX ENO assert tp->t_eno->ec_sessid_len + 1 == len + 1
+			 * what if unlocked sessid got updated to a longer one?
+			 * ... still, we are safe to not copy more than pbuf's size */
+			bcopy((char *) tp->t_eno->ec_sessid, pbuf + 1, len - 1);
+			INP_WUNLOCK(inp);
+
+			error = sooptcopyout(sopt, pbuf, len);
+			free(pbuf, M_TEMP);
+			break;
+		/* XXX ENO case TCP_ENO_RAW: / * RW | bytes */
+		case TCP_ENO_TRANSCRIPT: /* R | bytes */
+			if(tp->t_state < TCPS_SYN_SENT) {
+				INP_WUNLOCK(inp);
+				return (ENOTCONN);
+			}
+
+			len = TCP_ENO_OPT_LEN(tp->t_eno->ec_self_transcript);
+			size_t len2 = TCP_ENO_OPT_LEN(tp->t_eno->ec_peer_transcript); /* XXX ENO someone will hurt me for this */
+			INP_WUNLOCK(inp);
+			/* if(len + len2 == 0) skip */
+			
+			pbuf = malloc(len + len2, M_TEMP, M_WAITOK);
+			INP_WLOCK_RECHECK_CLEANUP(inp, free(pbuf, M_TEMP));
+			
+			/* XXX ENO assert len and len2 is still the same as determined. ENO transcripts never shrink, so worst case is missing recent addition. */
+			bcopy((char *) tp->t_eno->ec_self_transcript, pbuf, len);
+			bcopy((char *) tp->t_eno->ec_peer_transcript, pbuf + len, len2);
+			INP_WUNLOCK(inp);
+
+			error = sooptcopyout(sopt, pbuf, len + len2);
+			free(pbuf, M_TEMP);
+			break;
+#endif
+
 		default:
 			INP_WUNLOCK(inp);
 			error = ENOPROTOOPT;

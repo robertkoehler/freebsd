@@ -601,7 +601,7 @@ crypto/rijndael/rijndael-api-fst.c optional ekcd | geom_bde | random !random_loa
 crypto/rijndael/rijndael-api.c	optional crypto | ipsec | ipsec_support | \
 	wlan_ccmp
 crypto/sha1.c			optional carp | crypto | ipsec | \
-	ipsec_support | netgraph_mppc_encryption | sctp 
+	ipsec_support | netgraph_mppc_encryption | sctp
 crypto/sha2/sha256c.c		optional crypto | ekcd | geom_bde | ipsec | \
 	ipsec_support | random !random_loadable | sctp | zfs
 crypto/sha2/sha512c.c		optional crypto | geom_bde | ipsec | \
@@ -1212,7 +1212,7 @@ dev/bhnd/cores/chipc/bhnd_chipc_if.m	optional bhnd
 dev/bhnd/cores/chipc/bhnd_sprom_chipc.c	optional bhnd
 dev/bhnd/cores/chipc/bhnd_pmu_chipc.c	optional bhnd
 dev/bhnd/cores/chipc/chipc.c		optional bhnd
-dev/bhnd/cores/chipc/chipc_cfi.c	optional bhnd cfi 
+dev/bhnd/cores/chipc/chipc_cfi.c	optional bhnd cfi
 dev/bhnd/cores/chipc/chipc_slicer.c	optional bhnd cfi | bhnd spibus
 dev/bhnd/cores/chipc/chipc_spi.c	optional bhnd spibus
 dev/bhnd/cores/chipc/chipc_subr.c	optional bhnd
@@ -4141,6 +4141,7 @@ netinet/tcp_syncache.c		optional inet | inet6
 netinet/tcp_timer.c		optional inet | inet6
 netinet/tcp_timewait.c		optional inet | inet6
 netinet/tcp_usrreq.c		optional inet | inet6
+netinet/tcp_eno.c		optional tcp_eno inet | tcp_eno inet6
 netinet/udp_usrreq.c		optional inet | inet6
 netinet/libalias/alias.c	optional libalias inet | netgraph_nat inet
 netinet/libalias/alias_db.c	optional libalias inet | netgraph_nat inet

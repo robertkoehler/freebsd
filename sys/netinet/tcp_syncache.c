@@ -95,7 +95,11 @@ __FBSDID("$FreeBSD$");
 #ifdef TCP_OFFLOAD
 #include <netinet/toecore.h>
 #endif
-
+#ifdef TCP_ENO
+#include <sys/_bitset.h>
+#include <sys/bitset.h>
+#include <netinet/tcp_eno.h>
+#endif
 #include <netipsec/ipsec_support.h>
 
 #include <machine/in_cksum.h>
@@ -791,7 +795,7 @@ syncache_socket(struct syncache *sc, struct socket *lso, struct mbuf *m)
 		struct sockaddr_in sin;
 
 		inp->inp_options = (m) ? ip_srcroute(m) : NULL;
-		
+
 		if (inp->inp_options == NULL) {
 			inp->inp_options = sc->sc_ipopts;
 			sc->sc_ipopts = NULL;
@@ -835,11 +839,11 @@ syncache_socket(struct syncache *sc, struct socket *lso, struct mbuf *m)
 	if (V_functions_inherit_listen_socket_stack && blk != tp->t_fb) {
 		/*
 		 * Our parents t_fb was not the default,
-		 * we need to release our ref on tp->t_fb and 
+		 * we need to release our ref on tp->t_fb and
 		 * pickup one on the new entry.
 		 */
 		struct tcp_function_block *rblk;
-		
+
 		rblk = find_and_ref_tcp_fb(blk);
 		KASSERT(rblk != NULL,
 		    ("cannot find blk %p out of syncache?", blk));
@@ -850,7 +854,7 @@ syncache_socket(struct syncache *sc, struct socket *lso, struct mbuf *m)
 		if (tp->t_fb->tfb_tcp_fb_init) {
 			(*tp->t_fb->tfb_tcp_fb_init)(tp);
 		}
-	}		
+	}
 	tp->snd_wl1 = sc->sc_irs;
 	tp->snd_max = tp->iss + 1;
 	tp->snd_nxt = tp->iss + 1;
@@ -884,6 +888,15 @@ syncache_socket(struct syncache *sc, struct socket *lso, struct mbuf *m)
 
 	if (sc->sc_flags & SCF_ECN)
 		tp->t_flags |= TF_ECN_PERMIT;
+
+#ifdef TCP_ENO
+	if(sc->sc_eno != NULL) { /* got the ENO control in the syncookie already ... */
+		/* XXX ENO tcpcb gets initialized with empty eno ctrl. we need to move that so it gets initialized later ... */
+		printf("tcp_syncache_socket(): replace new tp->t_eno\n");
+		tcp_eno_control_free(tp->t_eno);
+		tp->t_eno = sc->sc_eno;
+	}
+#endif
 
 	/*
 	 * Set up MSS and get cached values from tcp_hostcache.
@@ -1051,7 +1064,7 @@ syncache_expand(struct in_conninfo *inc, struct tcpopt *to, struct tcphdr *th,
 #endif /* TCP_SIGNATURE */
 		/*
 		 * Pull out the entry to unlock the bucket row.
-		 * 
+		 *
 		 * NOTE: We must decrease TCPS_SYN_RECEIVED count here, not
 		 * tcp_state_change().  The tcpcb is not existent at this
 		 * moment.  A new one will be allocated via syncache_socket->
@@ -1138,6 +1151,18 @@ syncache_expand(struct in_conninfo *inc, struct tcpopt *to, struct tcphdr *th,
 			    s, __func__, to->to_tsecr, sc->sc_ts);
 		goto failed;
 	}
+
+#ifdef TCP_ENO
+	/* XXX handle ACK+ENO<data>: option data can be empty or contain TEP specific data.  */
+	printf("tcp_syncache_expand() verify final ACK+ENO<>\n");
+	/* XXX ENO sc_eno is uninitialized if no eno received */
+	if(sc->sc_eno != NULL && ENOS_STATE(sc->sc_eno->ec_state) == ENOS_NEGOTIATE) {
+		if(!(to->to_flags & TOF_ENO))
+			TCP_ENO_FAIL(sc->sc_eno, ENOS_ACK | ENOS_OPTMISSING);
+		else
+			sc->sc_eno->ec_state = ENOS_SUCCESS | ENOS_ACK | ENOS_RECVD;
+	}
+#endif
 
 	*lsop = syncache_socket(sc, *lsop, m);
 
@@ -1289,6 +1314,19 @@ syncache_add(struct in_conninfo *inc, struct tcpopt *to, struct tcphdr *th,
 		tfo_pending = tp->t_tfo_pending;
 	}
 #endif
+
+#ifdef TCP_ENO
+	/* accessing the listening tp ... */
+	/* have tp, but no sc */
+	KASSERT(tp != NULL, ("%s: tp is NULL", __func__));
+	KASSERT(tp->t_eno != NULL, ("%s: t_eno is NULL", __func__));
+	bool eno_enabled; /* XXX ENO declare at func top */
+	eno_enabled = (tp->t_eno->ec_enabled == ENO_ENABLED_SYSCTL ? V_tcp_eno_enable_listen : tp->t_eno->ec_enabled);
+	printf("syncache_add()#1\n");
+#endif
+
+
+
 
 	/* By the time we drop the lock these should no longer be used. */
 	so = NULL;
@@ -1527,6 +1565,25 @@ skip_alloc:
 	if ((th->th_flags & (TH_ECE|TH_CWR)) && V_tcp_do_ecn)
 		sc->sc_flags |= SCF_ECN;
 
+#ifdef TCP_ENO
+	/* SYN|ACK received, doing flags ... do ENO aswell: copy transcript into sc for later use */
+	printf("syncache_add()#2: to_flags=%x=ENO%d\n", to->to_flags, (to->to_flags & TOF_ENO) > 1);
+	/* XXX ENO tp init should not allocate another ENO control ... */
+	/* XXX ENO currently allocating this every time so ec_state contains complete info. Move ec_state to sc/tp and init only if required, thats what the dyn. memory alloc is for! */
+	sc->sc_eno = tcp_eno_control_alloc();
+
+	if(!eno_enabled)
+		sc->sc_eno->ec_state = ENOS_OFF | ENOS_SYN | ENOS_DISABLED;
+	else if(ENO_PORT_ISSET(&V_tcp_eno_bad_listen_ports, th->th_dport))
+		sc->sc_eno->ec_state = ENOS_OFF | ENOS_SYN | ENOS_BADPORT;
+	else if(!(to->to_flags & TOF_ENO))
+		TCP_ENO_FAIL(sc->sc_eno, ENOS_SYN | ENOS_OPTMISSING);
+	else {
+		sc->sc_eno->ec_state = ENOS_NEGOTIATE;
+		sc->sc_eno_peer_transcript = tcp_eno_option_alloc(to->to_eno);
+	}
+#endif
+
 	if (V_tcp_syncookies)
 		sc->sc_iss = syncookie_generate(sch, sc);
 #ifdef INET6
@@ -1729,6 +1786,14 @@ syncache_respond(struct syncache *sc, struct syncache_head *sch, int locked,
 			sc->sc_tfo_cookie = NULL;
 		}
 #endif
+#ifdef TCP_ENO
+		printf("syncache_respond()\n");
+		/* XXX ENO use SC_..._ENO flag? */
+		if(sc->sc_eno_peer_transcript != NULL) {
+			tcp_eno_option_reply(sc->sc_eno_peer_transcript, sc->sc_eno, &to);
+		}
+#endif
+
 		optlen = tcp_addoptions(&to, (u_char *)(th + 1));
 
 		/* Adjust headers by option size. */
@@ -2028,7 +2093,7 @@ syncookie_generate(struct syncache_head *sch, struct syncache *sc)
 }
 
 static struct syncache *
-syncookie_lookup(struct in_conninfo *inc, struct syncache_head *sch, 
+syncookie_lookup(struct in_conninfo *inc, struct syncache_head *sch,
     struct syncache *sc, struct tcphdr *th, struct tcpopt *to,
     struct socket *lso)
 {
@@ -2066,7 +2131,7 @@ syncookie_lookup(struct in_conninfo *inc, struct syncache_head *sch,
 	sc->sc_flags = 0;
 	bcopy(inc, &sc->sc_inc, sizeof(struct in_conninfo));
 	sc->sc_ipopts = NULL;
-	
+
 	sc->sc_irs = seq;
 	sc->sc_iss = ack;
 

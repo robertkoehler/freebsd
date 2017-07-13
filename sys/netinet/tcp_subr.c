@@ -117,6 +117,9 @@ __FBSDID("$FreeBSD$");
 #ifdef TCP_OFFLOAD
 #include <netinet/tcp_offload.h>
 #endif
+#ifdef TCP_ENO
+#include <netinet/tcp_eno.h>
+#endif
 
 #include <netipsec/ipsec_support.h>
 
@@ -668,6 +671,9 @@ tcp_init(void)
 #ifdef TCP_RFC7413
 	tcp_fastopen_init();
 #endif
+#ifdef TCP_ENO
+	tcp_eno_init();
+#endif
 
 	/* Skip initialization of globals for non-default instances. */
 	if (!IS_DEFAULT_VNET(curvnet))
@@ -1055,6 +1061,15 @@ tcp_respond(struct tcpcb *tp, void *ipgen, struct tcphdr *th, struct mbuf *m,
 		if (tp->t_flags & TF_SIGNATURE)
 			to.to_flags |= TOF_SIGNATURE;
 #endif
+
+
+		printf("tcp_respond() state=%d flags=%d=S%dA%d\n", tp->t_state, flags, (flags & TH_SYN) > 1, (flags & TH_ACK) > 1);
+
+		if(flags & TH_SYN) {
+			to.to_flags |= TOF_ENO;
+			printf("tcp_respond() setting TOF_ENO\n");
+		}
+		
 		/* Add the options. */
 		tlen += optlen = tcp_addoptions(&to, optp);
 
@@ -1275,6 +1290,12 @@ tcp_newtcpcb(struct inpcb *inp)
 	if (tp->t_fb->tfb_tcp_fb_init) {
 		(*tp->t_fb->tfb_tcp_fb_init)(tp);
 	}
+
+#ifdef TCP_ENO
+	/* XXX ENO delay this until it's really required */
+	tp->t_eno = tcp_eno_control_alloc();
+#endif
+
 	return (tp);		/* XXX */
 }
 
@@ -1483,6 +1504,10 @@ tcp_discardcb(struct tcpcb *tp)
 
 #ifdef TCP_HHOOK
 	khelp_destroy_osd(tp->osd);
+#endif
+
+#ifdef TCP_ENO
+	tcp_eno_control_free(tp->t_eno);
 #endif
 
 	CC_ALGO(tp) = NULL;
